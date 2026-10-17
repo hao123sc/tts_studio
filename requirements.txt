@@ -1,0 +1,12 @@
+# TTS Studio 配音工作站 —— 运行依赖（Python 3.11+）
+PySide6>=6.5
+edge-tts>=6.1
+numpy>=1.24
+scipy>=1.10
+soundfile>=0.12
+lameenc>=1.7
+pyttsx3>=2.90
+
+# 开发/打包
+pytest>=7.0
+# pyinstaller>=6.0   # 打包 exe 时安装

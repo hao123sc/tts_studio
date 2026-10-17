@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 打包产物
+build/dist/
+dist/
+*.spec
+
+# 运行时数据（输出音频/缓存/日志在用户目录或项目 out/）
+data/cache/
+data/out/
+data/voices/
+out/
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
