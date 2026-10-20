@@ -76,3 +76,29 @@ def save_config(cfg: AppConfig) -> None:
     """保存配置到用户目录。"""
     p = user_data_dir() / CONFIG_FILE
     p.write_text(json.dumps(asdict(cfg), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def validate_proxy(value: str) -> tuple[str, str]:
+    """校验/清洗代理地址（FR-S-3，Edge-TTS 403/超时时用）。
+
+    :returns: ``(清洗后的代理串, 错误提示)``；合法时错误提示为空字符串。
+      空值合法（表示直连）。
+    """
+    v = (value or "").strip()
+    if not v:
+        return "", ""
+    if "://" not in v:
+        v = "http://" + v
+    scheme, _, rest = v.partition("://")
+    scheme = scheme.lower()
+    if scheme not in ("http", "https"):
+        return "", f"代理协议「{scheme}」暂不支持；请用 http:// 或 https:// 开头（如 http://127.0.0.1:7890）"
+    if not rest or " " in v:
+        return "", "代理地址不完整；正确格式如 http://127.0.0.1:7890 或 http://用户名:密码@主机:端口"
+    hostport = rest.rsplit("@", 1)[-1]
+    host, _, port = hostport.partition(":")
+    if not host:
+        return "", "代理地址缺少主机名"
+    if port and not port.isdigit():
+        return "", f"代理端口「{port}」不是数字"
+    return v, ""

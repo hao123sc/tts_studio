@@ -195,13 +195,14 @@ class EdgeEngine:
 
     @staticmethod
     def _translate_error(exc: Exception) -> EngineError:
-        """把底层异常翻译为中文可读错误。"""
+        """把底层异常翻译为中文可读错误（含代理设置入口提示）。"""
         detail = f"{type(exc).__name__}: {exc}"
         text = str(exc).lower()
+        hint = "可在「设置 → 网络代理」配置代理（如 http://127.0.0.1:7890），保存后立即生效。"
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-            return EngineNetworkError("Edge-TTS 连接超时，请检查网络或在设置中配置代理", detail=detail)
+            return EngineNetworkError(f"Edge-TTS 连接超时，请检查网络；{hint}", detail=detail)
         if "403" in text or "forbidden" in text:
-            return EngineNetworkError("Edge-TTS 返回 403（网络环境被拒），请换网络或配置代理", detail=detail)
+            return EngineNetworkError(f"Edge-TTS 返回 403（网络环境被拒），请换网络或配置代理；{hint}", detail=detail)
         if any(k in text for k in ("resolve", "connect", "network", "timeout", "ssl", "proxy", "dns")):
-            return EngineNetworkError("无法连接 Edge-TTS 服务器，请检查网络", detail=detail)
+            return EngineNetworkError(f"无法连接 Edge-TTS 服务器，请检查网络；{hint}", detail=detail)
         return EngineError("Edge-TTS 合成失败", detail=detail)

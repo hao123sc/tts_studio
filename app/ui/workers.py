@@ -110,3 +110,27 @@ class GenerateWorker(QThread):
             msg = exc.copyable() if isinstance(exc, EngineError) else f"{type(exc).__name__}: {exc}"
             self.event.emit(QueueEvent("warning", message=f"生成中断：{msg}"))
         self.finished_ok.emit(summary)
+
+
+class ProxyTestWorker(QThread):
+    """测试代理/网络连通性：用当前代理拉一次 Edge-TTS 音色清单。"""
+
+    done = Signal(bool, str)   # (是否成功, 中文说明)
+
+    def __init__(self, proxy: str, parent=None) -> None:
+        super().__init__(parent)
+        self.proxy = proxy
+
+    def run(self) -> None:  # noqa: D102
+        from ..engines.edge import EdgeEngine
+
+        try:
+            eng = EdgeEngine(proxy=self.proxy, timeout=15.0)
+            voices = eng.list_voices()
+            if eng.used_builtin_fallback:
+                self.done.emit(False, "连接失败：仍无法拉取音色清单（代理无效或网络被拒）。")
+            else:
+                src = f"通过代理 {self.proxy}" if self.proxy else "直连"
+                self.done.emit(True, f"{src}成功，拉到 {len(voices)} 个音色。")
+        except Exception as exc:  # noqa: BLE001
+            self.done.emit(False, f"连接失败：{exc}")

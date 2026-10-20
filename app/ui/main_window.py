@@ -505,9 +505,27 @@ class MainWindow(QMainWindow):
         self.queue_panel.append(f"正在生成试听：{self._voice_names.get(voice_id, voice_id)} …")
         worker = PreviewWorker(self._engines(), self.registry, self.cfg.cache_path(), voice_id)
         worker.ready.connect(self._on_preview_ready)
-        worker.failed.connect(lambda vid, e: self.queue_panel.append(f"⚠ 试听失败：{e}"))
+        worker.failed.connect(self._on_preview_failed)
         self._workers.append(worker)
         worker.start()
+
+    def _on_preview_failed(self, voice_id: str, error: str) -> None:
+        """试听失败：网络类错误直达代理设置（FR-S-3）。"""
+        self.queue_panel.append(f"⚠ 试听失败：{error}")
+        name = self._voice_names.get(voice_id, voice_id)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("试听失败")
+        box.setText(f"「{name}」试听失败：{error}")
+        box.setInformativeText("如果是网络问题（403 / 超时 / 连不上），可在设置中配置代理，保存后立即生效。")
+        btn_settings = box.addButton("打开代理设置…", QMessageBox.AcceptRole)
+        btn_retry = box.addButton("重试试听", QMessageBox.ActionRole)
+        box.addButton("关闭", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() == btn_settings:
+            self.open_settings()
+        elif box.clickedButton() == btn_retry:
+            self._on_preview(voice_id)
 
     def _on_preview_ready(self, voice_id: str, path: str) -> None:
         self.queue_panel.append(f"试听就绪：{self._voice_names.get(voice_id, voice_id)}")
@@ -722,7 +740,16 @@ class MainWindow(QMainWindow):
         if summary.failures:
             detail += "异常清单（可复制）：\n" + "\n".join(f"第 {i} 段：{e}" for i, e in summary.failures)
         out.setDetailedText(detail)
+        net_failures = [e for _, e in summary.failures
+                        if any(k in e for k in ("网络", "403", "超时", "连接", "Edge-TTS"))]
+        btn_proxy = None
+        if net_failures:
+            out.setInformativeText("存在网络类失败，可在设置中配置代理（保存后立即生效）。")
+            btn_proxy = out.addButton("打开代理设置…", QMessageBox.ActionRole)
+        out.addButton(QMessageBox.Ok)
         out.exec()
+        if btn_proxy is not None and out.clickedButton() == btn_proxy:
+            self.open_settings()
 
     # --------------------------------------------------------------- 导出
     def export_delivery(self) -> None:
@@ -768,9 +795,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("发音词典已更新（对之后的生成生效，词典变化会触发相关段重做）")
 
     def open_settings(self) -> None:
+        old_proxy = self.cfg.proxy
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec():
-            self.statusBar().showMessage("设置已保存（部分设置重启后生效）")
+            if self.cfg.proxy != old_proxy:
+                # 代理保存后立即生效：重建引擎并重新拉取音色，无需重启
+                self.queue_panel.append(
+                    f"网络代理已更新：{self.cfg.proxy or '（直连）'}，正在重新拉取音色清单……"
+                )
+                self._load_engines_and_voices()
+                self.statusBar().showMessage("设置已保存并立即生效（代理已应用，正在重试连接）")
+            else:
+                self.statusBar().showMessage("设置已保存并立即生效")
 
     # --------------------------------------------------------------- 关闭
     def closeEvent(self, event) -> None:  # noqa: N802
