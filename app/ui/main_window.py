@@ -510,22 +510,47 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _on_preview_failed(self, voice_id: str, error: str) -> None:
-        """试听失败：网络类错误直达代理设置（FR-S-3）。"""
+        """试听失败：网络类错误直达代理设置（FR-S-3），并提供离线音色试听兜底。"""
         self.queue_panel.append(f"⚠ 试听失败：{error}")
         name = self._voice_names.get(voice_id, voice_id)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("试听失败")
         box.setText(f"「{name}」试听失败：{error}")
-        box.setInformativeText("如果是网络问题（403 / 超时 / 连不上），可在设置中配置代理，保存后立即生效。")
+        info = "如果是网络问题（403 / 超时 / 连不上），可在设置中配置代理，保存后立即生效。"
+        if "403" in error:
+            info += ("\n提示：若代理测试是「①✓②✗」，说明出口节点被微软拒——"
+                     "请在代理软件里换一个节点/地区（如日本、新加坡）再试。")
+        box.setInformativeText(info)
         btn_settings = box.addButton("打开代理设置…", QMessageBox.AcceptRole)
         btn_retry = box.addButton("重试试听", QMessageBox.ActionRole)
+        btn_offline = box.addButton("用系统离线音色试听", QMessageBox.ActionRole)
         box.addButton("关闭", QMessageBox.RejectRole)
         box.exec()
         if box.clickedButton() == btn_settings:
             self.open_settings()
         elif box.clickedButton() == btn_retry:
             self._on_preview(voice_id)
+        elif box.clickedButton() == btn_offline:
+            self._preview_offline(voice_id)
+
+    def _preview_offline(self, failed_voice_id: str) -> None:
+        """网络试听失败时，用系统 SAPI 离线音色兜底试听。"""
+        from ..engines.sapi import SapiEngine
+
+        sapi = self._engines().get("sapi")
+        candidates = sapi.list_voices() if sapi else []
+        if not candidates:
+            QMessageBox.information(self, "离线音色",
+                                    "当前系统没有可用的离线语音（Windows 为 SAPI；请检查系统语音组件）。")
+            return
+        mapped = SapiEngine.map_voice_id(failed_voice_id, candidates)
+        self.queue_panel.append(f"改用系统离线音色试听：{self._voice_names.get(mapped, mapped)}")
+        worker = PreviewWorker(self._engines(), self.registry, self.cfg.cache_path(), mapped)
+        worker.ready.connect(self._on_preview_ready)
+        worker.failed.connect(self._on_preview_failed)
+        self._workers.append(worker)
+        worker.start()
 
     def _on_preview_ready(self, voice_id: str, path: str) -> None:
         self.queue_panel.append(f"试听就绪：{self._voice_names.get(voice_id, voice_id)}")
@@ -813,6 +838,10 @@ class MainWindow(QMainWindow):
         if self._generate_worker and self._generate_worker.isRunning():
             self._generate_worker.queue.cancel()
             self._generate_worker.wait(3000)
+        # 等待其余后台线程收尾，避免 "QThread: Destroyed while running"
+        for w in list(self._workers):
+            if w.isRunning():
+                w.wait(5000)
         if self._dirty and self.project_path:
             self._collect_project_params()
             save_project(self.project_path, self.project)

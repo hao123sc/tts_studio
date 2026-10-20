@@ -1,7 +1,13 @@
-"""Qt 后台线程：音色加载、试听生成、批量生成（UI 不阻塞）。"""
+"""Qt 后台线程：音色加载、试听生成、代理测试、批量生成（UI 不阻塞）。
+
+线程生命周期约定：所有 QThread 实例在 ``finished`` 前由全局 :data:`_LIVE`
+保活，防止被垃圾回收时打印 "QThread: Destroyed while thread is still running"。
+"""
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
@@ -11,6 +17,20 @@ from ..core.project import Project, Segment
 from ..core.queue import JobQueue, QueueEvent
 
 log = get_logger()
+
+#: 运行中线程保活集合（finished 后自动移除）
+_LIVE: set = set()
+
+
+def _keep(thread: QThread) -> QThread:
+    """把线程登记进保活集合，finished 后释放。"""
+    _LIVE.add(thread)
+
+    def _release() -> None:
+        _LIVE.discard(thread)
+
+    thread.finished.connect(_release)
+    return thread
 
 
 class VoiceLoadWorker(QThread):
@@ -23,6 +43,7 @@ class VoiceLoadWorker(QThread):
         super().__init__(parent)
         self.engines = engines
         self.registry = registry
+        _keep(self)
 
     def run(self) -> None:  # noqa: D102
         warnings: list[str] = []
@@ -56,6 +77,7 @@ class PreviewWorker(QThread):
         self.registry = registry
         self.cache_dir = Path(cache_dir)
         self.voice_id = voice_id
+        _keep(self)
 
     def run(self) -> None:  # noqa: D102
         import hashlib
@@ -92,6 +114,7 @@ class GenerateWorker(QThread):
         self.output_dir = Path(output_dir)
         self.resume = resume
         self.force = force
+        _keep(self)
 
     def run(self) -> None:  # noqa: D102
         def _cb(ev: QueueEvent) -> None:
@@ -113,24 +136,54 @@ class GenerateWorker(QThread):
 
 
 class ProxyTestWorker(QThread):
-    """测试代理/网络连通性：用当前代理拉一次 Edge-TTS 音色清单。"""
+    """测试代理/网络连通性（两步，对应真实使用链路）：
 
-    done = Signal(bool, str)   # (是否成功, 中文说明)
+    ① 拉取音色清单（list_voices）；
+    ② **真实合成一小段音频**（synth）—— 试听/生成走的就是这一步。
+
+    只测 ① 不够：曾出现"清单拉取成功但合成 403"（合成端点 IP 检查更严），
+    所以必须两步都过才算可用。
+    """
+
+    done = Signal(bool, str)   # (是否全部成功, 中文说明)
 
     def __init__(self, proxy: str, parent=None) -> None:
         super().__init__(parent)
         self.proxy = proxy
+        _keep(self)
 
     def run(self) -> None:  # noqa: D102
+        from ..engines.base import TTSRequest
         from ..engines.edge import EdgeEngine
 
+        src = f"通过代理 {self.proxy}" if self.proxy else "直连"
+        eng = EdgeEngine(proxy=self.proxy, timeout=10.0)
+
+        # ① 音色清单
         try:
-            eng = EdgeEngine(proxy=self.proxy, timeout=15.0)
             voices = eng.list_voices()
-            if eng.used_builtin_fallback:
-                self.done.emit(False, "连接失败：仍无法拉取音色清单（代理无效或网络被拒）。")
-            else:
-                src = f"通过代理 {self.proxy}" if self.proxy else "直连"
-                self.done.emit(True, f"{src}成功，拉到 {len(voices)} 个音色。")
         except Exception as exc:  # noqa: BLE001
-            self.done.emit(False, f"连接失败：{exc}")
+            self.done.emit(False, f"① 音色清单 ✗：{src}失败（{exc}）。请检查代理地址/端口。")
+            return
+        if eng.used_builtin_fallback:
+            self.done.emit(False, f"① 音色清单 ✗：{src}连不上 Edge-TTS。请检查代理地址/端口，或换网络。")
+            return
+
+        # ② 真实合成（试听/生成同链路）
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                out = os.path.join(td, "proxy_test.mp3")
+                eng.synth(TTSRequest(text="你好，测试。", voice_id="edge:zh-CN-YunxiNeural"), out)
+                size = os.path.getsize(out)
+            if size <= 0:
+                raise RuntimeError("合成结果为空")
+            self.done.emit(True, f"① 音色清单 ✓（{len(voices)} 个）；② 语音合成 ✓ —— 试听/生成可用。")
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            if "403" in msg:
+                hint = ("① 音色清单 ✓（%d 个）；② 语音合成 ✗：出口 IP 被微软拒绝（403）。\n"
+                        "清单能拉到但合成被拒，通常是代理出口节点问题：请在代理软件里换一个"
+                        "节点/地区（如换到日本、新加坡），再点「测试连接」。" % len(voices))
+            else:
+                hint = f"① 音色清单 ✓（{len(voices)} 个）；② 语音合成 ✗：{msg}"
+            self.done.emit(False, hint)

@@ -1,4 +1,8 @@
-"""设置对话框（FR-S-3）：缓存目录、代理（403/超时必设，保存后立即生效）、API Key（仅存本地）。"""
+"""设置对话框（FR-S-3）：缓存目录、代理（403/超时必设，保存后立即生效）、API Key（仅存本地）。
+
+自检要点：本文件所有 Qt 类都从 PySide6.QtWidgets 显式导入（含 QScrollArea），
+修改时不要删减导入块；内容区放在 QScrollArea 里，1366×768 小屏也能完整操作。
+"""
 
 from __future__ import annotations
 
@@ -13,7 +17,9 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from ..core.config import AppConfig, save_config, validate_proxy
@@ -26,10 +32,17 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg: AppConfig, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("设置")
-        self.setMinimumWidth(520)
+        self.setMinimumSize(560, 520)
         self.cfg = cfg
         self._test_worker: ProxyTestWorker | None = None
-        lay = QVBoxLayout(self)
+
+        outer = QVBoxLayout(self)
+
+        # ---- 可滚动内容区（小屏不溢出）----
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        lay = QVBoxLayout(body)
         form = QFormLayout()
 
         self.cache_dir = QLineEdit(cfg.cache_dir)
@@ -42,14 +55,15 @@ class SettingsDialog(QDialog):
         self.proxy = QLineEdit(cfg.proxy)
         self.proxy.setPlaceholderText("http://127.0.0.1:7890（也支持 http://用户名:密码@主机:端口）")
         self.btn_test = QPushButton("测试连接")
-        self.btn_test.setToolTip("用当前填写的代理拉取一次 Edge-TTS 音色清单，验证是否可用")
+        self.btn_test.setToolTip("① 拉一次音色清单 + ② 真实合成一小段语音；两步都通过，试听/生成才可用")
         self.btn_test.clicked.connect(self._test_proxy)
         proxy_row.addWidget(self.proxy, 1)
         proxy_row.addWidget(self.btn_test)
         proxy_box.addLayout(proxy_row)
         self.proxy_hint = QLabel(
             "Edge-TTS 报 403 / 超时 / 连不上时，在这里填代理地址，保存后立即生效，无需重启；\n"
-            "留空 = 直连。仅支持 http:// 或 https:// 代理（如 Clash/V2Ray 的 http 入站端口）。"
+            "留空 = 直连。仅支持 http:// 或 https:// 代理（如 Clash/V2Ray 的 http 入站端口）。\n"
+            "提示：若「测试连接」显示 ①✓②✗（403），是代理出口节点被微软拒，请在代理软件里换节点/地区。"
         )
         self.proxy_hint.setWordWrap(True)
         self.proxy_hint.setStyleSheet("color:#666; font-size:9pt;")
@@ -57,6 +71,7 @@ class SettingsDialog(QDialog):
         self.proxy_result = QLabel("")
         self.proxy_result.setWordWrap(True)
         self.proxy_result.setStyleSheet("font-size:10pt;")
+        self.proxy_result.setMinimumHeight(40)
         proxy_box.addWidget(self.proxy_result)
         form.addRow("网络代理\n(Edge-TTS)", proxy_box)
 
@@ -96,18 +111,24 @@ class SettingsDialog(QDialog):
         compliance.setWordWrap(True)
         compliance.setStyleSheet("color:#a60; font-size:9pt;")
         lay.addWidget(compliance)
+        lay.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)
+
+        # ---- 底部按钮（始终可见）----
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("保存并立即生效")
         buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
-        lay.addWidget(buttons)
+        outer.addWidget(buttons)
 
+    # -- 代理测试 ----------------------------------------------------------
     def _current_proxy(self) -> str:
         return self.proxy.text().strip()
 
     def _test_proxy(self) -> None:
-        """测试代理/网络连通性（后台执行，不卡界面）。"""
+        """测试代理/网络连通性（①清单 ②真实合成，后台执行不卡界面）。"""
         proxy, err = validate_proxy(self._current_proxy())
         if err:
             self.proxy_result.setStyleSheet("color:#b00; font-size:10pt;")
@@ -115,7 +136,7 @@ class SettingsDialog(QDialog):
             return
         self.btn_test.setEnabled(False)
         self.proxy_result.setStyleSheet("color:#666; font-size:10pt;")
-        self.proxy_result.setText("正在连接 Edge-TTS 测试……（最多约 15 秒）")
+        self.proxy_result.setText("正在测试：① 拉取音色清单 → ② 真实合成一小段语音……（最多约 30 秒）")
         self._test_worker = ProxyTestWorker(proxy)
         self._test_worker.done.connect(self._on_test_done)
         self._test_worker.start()
@@ -127,6 +148,7 @@ class SettingsDialog(QDialog):
         )
         self.proxy_result.setText(("✓ " if ok else "✗ ") + message)
 
+    # -- 保存 --------------------------------------------------------------
     def _save(self) -> None:
         proxy, err = validate_proxy(self.proxy.text())
         if err:
@@ -143,3 +165,20 @@ class SettingsDialog(QDialog):
         self.cfg.api_keys["tencent"] = self.key_tencent.text().strip()
         save_config(self.cfg)
         self.accept()
+
+    # -- 关闭（等测试线程收尾，避免 QThread 被销毁警告）----------------------
+    def closeEvent(self, event) -> None:  # noqa: N802
+        if self._test_worker is not None and self._test_worker.isRunning():
+            self.proxy_result.setText("正在等待网络测试结束……")
+            self._test_worker.wait(15000)
+        super().closeEvent(event)
+
+    def reject(self) -> None:  # noqa: D102
+        if self._test_worker is not None and self._test_worker.isRunning():
+            self._test_worker.wait(15000)
+        super().reject()
+
+    def accept(self) -> None:  # noqa: D102
+        if self._test_worker is not None and self._test_worker.isRunning():
+            self._test_worker.wait(15000)
+        super().accept()
